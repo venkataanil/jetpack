@@ -10,6 +10,16 @@
       dest: "{{ infrared_dir }}"
       force: yes
 
+- name: use multihypervisors patch
+  shell: |
+    git fetch "https://review.gerrithub.io/redhat-openstack/infrared" refs/changes/83/461583/13 && git checkout FETCH_HEAD
+    git checkout -b multi-hypervisor
+  args:
+    chdir: "{{ infrared_dir }}"  
+  ignore_errors: true
+  tags:
+    - multihypervisors
+
 - name: infrared setup
   shell: |
       virtualenv .venv && source .venv/bin/activate

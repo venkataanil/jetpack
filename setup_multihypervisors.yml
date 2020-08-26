@@ -1,0 +1,97 @@
+- hosts: localhost
+  gather_facts: yes  
+  tasks:
+    - name: get hyperviosr hosts
+      shell: |
+        echo "{{ oc_instackenv_content.nodes[item | int].pm_addr | replace('mgmt-','') | replace('-drac', '') }}"
+      with_sequence: 4-{{ (oc_instackenv_content.nodes|length - 1) }}
+      register: host_list
+
+    - name: hostname list
+      set_fact:
+         hostname_list: "{{ hostname_list|default([]) + [item.stdout] }}"
+      with_items: "{{ host_list.results }}"
+
+    - include_tasks: tasks/install_os.yml
+      vars:
+        chassis_password:  "{{ instackenv_content.nodes[0].pm_password }}"
+        needed_os: "CentOS 7.7"        
+        hypervisor_host: "{{ hyp }}"
+        hypervisor_password: "{{ ansible_ssh_pass }}"
+      with_items: "{{ hostname_list }}"
+      loop_control:
+        loop_var: hyp
+
+    - include_tasks: tasks/copykeys.yml
+      vars:
+        hostname: "{{ hyp }}"
+        ssh_user: "root"
+        id_file:  "{{ ansible_ssh_key }}"
+      with_items: "{{ hostname_list }}"            
+      when: hypervisors_os_installed is defined and hyp in hypervisors_os_installed
+      loop_control:
+        loop_var: hyp
+
+    - include_tasks: tasks/get_interpreter.yml
+      vars:
+        hostname: "{{ hostname_list[0] }}"        
+        user: "root"
+
+    - block:
+      - name: Clean network interfaces
+        shell: |
+          /root/clean-interfaces.sh --nuke
+        changed_when: false
+      - name: install packages
+        package:
+          name: "{{ item }}"
+          state: installed
+        loop: ['gcc', 'libffi-devel', 'openssl-devel', 'python-virtualenv', 'libvirt', 'qemu-kvm', 'libselinux-python']
+      - name: start libvirtd
+        systemd:
+          state: started
+          name: libvirtd
+      ansible_python_interpreter: "{{ python_interpreter }}"
+      delegate_to: "{{ hyp }}"
+      with_items: "{{ hostname_list }}"      
+      when: hypervisors_os_installed is defined and hyp in hypervisors_os_installed
+      loop_control:
+        loop_var: hyp
+
+    # create ssh key on the first hypervisor
+    - block:      
+      - name: check if ssh key exists
+        stat:
+           path: "{{ ansible_ssh_key }}"
+        register: sshkey
+      - name:  Generate ssh key
+        shell:
+           ssh-keygen -q -N "" -f {{ ansible_ssh_key }}
+        when: sshkey.stat.exists == False      
+      ansible_python_interpreter: "{{ python_interpreter }}"
+      delegate_to: "{{ hostname_list[0] }}"
+
+    # copy first hypervisor key to all hypervisors (as vbmc ports are created on first hypervisor)
+    - include_tasks: tasks/copykeys.yml
+      vars:
+        hostname: "{{ hyp }}"
+        ssh_user: "root"
+        id_file:  "{{ ansible_ssh_key }}"
+      with_items: "{{ hostname_list }}"      
+      delegate_to: "{{ hostname_list[0] }}"      
+      loop_control:
+        loop_var: hyp
+
+    - name: prepare host address variable      
+      set_fact:
+        host-address: "--host-address {{ hostname_list | join(' --host-address ') }}"    
+
+    - name: run virsh for multi hypervisor
+        shell: |
+            source .venv/bin/activate
+            infrared virsh {{ host-address }} --host-key {{ ansible_ssh_key }} --topology-nodes compute:{{ compute_count|default(1) }} --topology-network 4_nets_multi_hypervisor --host-memory-overcommit True > {{ log_directory }}/virsh.log 2>&1            
+        args:
+            chdir: "{{ infrared_dir }}"
+
+    - name: reload inventory content created by virsh command
+      meta: refresh_inventory
